@@ -1,3 +1,5 @@
+import logging
+
 from django.http import FileResponse, Http404
 from django.shortcuts import get_object_or_404
 from rest_framework import status
@@ -9,6 +11,7 @@ from .models import ImageData
 from .serializers import ImageUploadSerializer
 from .services import create_image
 
+logger = logging.getLogger(__name__)
 
 class ImageUploadView(APIView):
     parser_classes = [MultiPartParser]
@@ -40,6 +43,10 @@ class ImageRetrieveView(APIView):
         try:
             file = image.file.open("rb")
         except FileNotFoundError:
+            logger.warning(
+                "Completed image file missing",
+                extra={"image_id": str(image.id)},
+            )
             raise Http404("Image file not found")
 
         return FileResponse(

@@ -1,5 +1,3 @@
-# images/services.py
-
 import logging
 
 from django.core.files.storage import Storage
