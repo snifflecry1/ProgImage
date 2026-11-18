@@ -1,0 +1,22 @@
+[tool.black]
+line-length = 88
+target-version = ["py312"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py312"
+
+[tool.ruff.lint]
+select = [
+    "E4",     # Import errors
+    "E7",     # Statement formatting
+    "E9",     # Syntax errors
+    "F",      # Pyflakes: unused imports, undefined names, etc.
+    "I",      # Import sorting
+    "SIM",    # Simplification suggestions
+    "RUF",    # Ruff-specific rules
+]
+
+[tool.ruff.lint.per-file-ignores]
+"**/migrations/*.py" = ["RUF012"]
+"images/views.py" = ["RUF012"]
