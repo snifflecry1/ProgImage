@@ -239,6 +239,12 @@ The command is safe to run concurrently with uploads and with itself, because ea
 
 A `(status, created_at)` index keeps the stale-upload query efficient as the table grows.
 
+### Database connections
+
+Connections are reused for up to 60 seconds (`CONN_MAX_AGE`, configurable with `POSTGRES_CONN_MAX_AGE`), and `CONN_HEALTH_CHECKS` checks a reused connection before each request, so a database restart or idle timeout causes a reconnect instead of a failed request.
+
+Application-level retries are deliberately not implemented. Retrying is only safe for steps that can be repeated without side effects (the initial insert and the conditional completion update), and retrying a whole upload without idempotency keys would create duplicate images. A failure mid-request returns `503`, and reconciliation guarantees that no record is left inconsistent.
+
 ### Image validation
 
 Pillow is used to identify the actual image format and verify image structure.
