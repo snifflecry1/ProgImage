@@ -84,6 +84,14 @@ The returned UUID identifies the uploaded image and can be used to retrieve it.
 
 Invalid requests return `400 Bad Request` with validation details.
 
+If the image cannot be stored, the API returns `503 Service Unavailable` and the client may retry:
+
+```json
+{
+  "detail": "The image could not be stored. Please retry."
+}
+```
+
 ### GET /images/{id}/
 
 Retrieve a previously uploaded image by UUID.
@@ -126,11 +134,12 @@ Test coverage includes:
 - Required file validation
 - Invalid image content
 - Unsupported image formats
-- Storage failure handling
+- Storage, completion and record-creation failures
 - Successful image retrieval
 - Unknown image IDs
 - Incomplete uploads
 - Missing stored files
+- Reconciliation of stale pending uploads
 
 Filesystem tests use temporary storage locations to avoid modifying persistent development data.
 
@@ -190,7 +199,7 @@ Each upload has a status:
 
 - `PENDING` — the metadata record has been created, but the upload has not completed
 - `COMPLETED` — the image has been stored successfully
-- `FAILED` — reserved for recording unsuccessful uploads
+- `FAILED` — storage or completion failed; any written file has been removed
 
 The upload flow is:
 
@@ -208,15 +217,27 @@ PostgreSQL and filesystem storage do not participate in a shared transaction.
 
 Consequently, a failure between writing the file and updating the database may leave a pending database record or an orphaned file.
 
-The current implementation deliberately keeps this failure handling simple:
+Failures are handled as follows:
 
-- Failed uploads are not exposed through the retrieval endpoint.
-- Unexpected storage errors are logged and propagated.
-- A failed or interrupted upload may leave a `PENDING` record for later investigation.
+- If storage or the completion update fails, the error is logged, the record is marked `FAILED`, any written file is deleted, and the API returns `503 Service Unavailable`.
+- The file is only deleted after the record is confirmed `FAILED`, so a `COMPLETED` record never loses its file.
+- A `PENDING` record is only left behind if the database is unavailable during cleanup or the process is killed mid-upload.
+- Failed and pending uploads are not exposed through the retrieval endpoint.
 
-A production system operating at larger scale could introduce periodic reconciliation to identify stale pending records and orphaned files.
+### Reconciliation
 
-This has intentionally not been implemented to avoid introducing unnecessary background infrastructure for the scope of this service.
+Uploads left `PENDING` (for example, the database was unavailable during cleanup or the process was killed) are recovered by a management command:
+
+```bash
+docker compose exec api python manage.py reconcile_images --dry-run
+docker compose exec api python manage.py reconcile_images --older-than 15
+```
+
+Stale `PENDING` records are marked `FAILED` and any written file is deleted. They are not promoted to `COMPLETED`: the client never received the image ID, and the file may be partially written.
+
+The command is safe to run concurrently with uploads and with itself, because each record only changes state through a conditional update. In production it would run on a schedule, for example every 5 minutes with cron or a Kubernetes CronJob.
+
+A `(status, created_at)` index keeps the stale-upload query efficient as the table grows.
 
 ### Image validation
 
@@ -241,7 +262,7 @@ This keeps individual components small and makes their behaviour straightforward
 
 The following improvements would be appropriate for a larger production deployment:
 
-- Automated reconciliation of stale pending uploads and orphaned files
+- Extended reconciliation: `COMPLETED` records whose file is missing, files with no matching record, and purging old `FAILED` records
 - Object storage such as Amazon S3 for distributed deployments
 - Additional monitoring and operational metrics
 - Rate limiting and authentication where access controls are required
@@ -255,6 +276,7 @@ These features are intentionally outside the current implementation.
 ProgImage/
 ├── config/              # Django project configuration
 ├── images/
+│   ├── management/      # reconcile_images command
 │   ├── migrations/      # Database migrations
 │   ├── tests/           # Automated tests
 │   ├── models.py        # Image metadata

@@ -21,11 +21,18 @@ class ImageUploadView(APIView):
         serializer = ImageUploadSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
-        image = create_image(
-            serializer.validated_data["file"],
-            content_type=serializer.validated_data["content_type"],
-            extension=serializer.validated_data["extension"],
-        )
+        try:
+            image = create_image(
+                serializer.validated_data["file"],
+                content_type=serializer.validated_data["content_type"],
+                extension=serializer.validated_data["extension"],
+            )
+        except Exception:
+            # Logged and cleaned up in create_image.
+            return Response(
+                {"detail": "The image could not be stored. Please retry."},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
 
         return Response(
             {"id": str(image.id)},
@@ -45,7 +52,8 @@ class ImageRetrieveView(APIView):
             file = image.file.open("rb")
         except FileNotFoundError:
             logger.warning(
-                "Completed image file missing",
+                "Completed image file missing image_id=%s",
+                image.id,
                 extra={"image_id": str(image.id)},
             )
             raise Http404("Image file not found")

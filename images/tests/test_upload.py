@@ -11,6 +11,9 @@ from rest_framework.test import APIClient
 
 from images.models import ImageData
 from images.serializers import MAX_FILE_SIZE, ImageUploadSerializer
+from images.services import mark_image_failed
+
+UPLOAD_FAILED = {"detail": "The image could not be stored. Please retry."}
 
 
 @pytest.fixture
@@ -116,24 +119,88 @@ def test_upload_unsupported_format_returns_400(client, media_storage):
 
 
 @pytest.mark.django_db
-def test_storage_failure_leaves_image_pending(client, media_storage):
-    with (
-        patch(
-            "django.core.files.storage.FileSystemStorage._save",
-            side_effect=OSError("Disk write failed"),
-        ),
-        pytest.raises(OSError, match="Disk write failed"),
+def test_storage_failure_marks_image_failed(client, media_storage):
+    with patch(
+        "django.core.files.storage.FileSystemStorage._save",
+        side_effect=OSError("Disk write failed"),
     ):
-        client.post(
-            reverse("image-upload"),
-            {"file": make_image()},
-            format="multipart",
+        response = client.post(
+            reverse("image-upload"), {"file": make_image()}, format="multipart"
         )
 
-    image = ImageData.objects.get()
+    assert response.status_code == 503
+    assert response.data == UPLOAD_FAILED
 
-    assert image.status == ImageData.Status.PENDING
+    image = ImageData.objects.get()
+    assert image.status == ImageData.Status.FAILED
     assert not (media_storage / image.file.name).exists()
+
+
+@pytest.mark.django_db
+def test_completion_failure_marks_failed_and_removes_file(client, media_storage):
+    with patch(
+        "images.services.mark_image_completed",
+        side_effect=RuntimeError("DB update failed"),
+    ):
+        response = client.post(
+            reverse("image-upload"), {"file": make_image()}, format="multipart"
+        )
+
+    assert response.status_code == 503
+
+    image = ImageData.objects.get()
+    assert image.status == ImageData.Status.FAILED
+    assert not (media_storage / image.file.name).exists()
+
+
+@pytest.mark.django_db
+def test_cleanup_db_error_keeps_pending_and_file(client, media_storage):
+    with (
+        patch(
+            "images.services.mark_image_completed",
+            side_effect=RuntimeError("DB update failed"),
+        ),
+        patch(
+            "images.services.mark_image_failed",
+            side_effect=RuntimeError("DB unavailable"),
+        ),
+    ):
+        response = client.post(
+            reverse("image-upload"), {"file": make_image()}, format="multipart"
+        )
+
+    assert response.status_code == 503
+
+    image = ImageData.objects.get()
+    assert image.status == ImageData.Status.PENDING
+    assert (media_storage / image.file.name).exists()
+
+
+@pytest.mark.django_db
+def test_record_creation_failure_returns_503(client, media_storage):
+    with patch(
+        "images.services.create_pending_image",
+        side_effect=RuntimeError("DB unavailable"),
+    ):
+        response = client.post(
+            reverse("image-upload"), {"file": make_image()}, format="multipart"
+        )
+
+    assert response.status_code == 503
+    assert ImageData.objects.count() == 0
+
+
+@pytest.mark.django_db
+def test_mark_image_failed_does_not_override_completed():
+    image = ImageData.objects.create(
+        content_type="image/png",
+        size_bytes=1,
+        status=ImageData.Status.COMPLETED,
+    )
+
+    assert mark_image_failed(image.id) is False
+    image.refresh_from_db()
+    assert image.status == ImageData.Status.COMPLETED
 
 
 def test_rejects_file_over_size_limit():
