@@ -2,6 +2,7 @@ import logging
 
 from django.http import FileResponse, Http404
 from django.shortcuts import get_object_or_404
+from django.utils.cache import patch_cache_control
 from rest_framework import status
 from rest_framework.parsers import MultiPartParser
 from rest_framework.response import Response
@@ -12,6 +13,8 @@ from .serializers import ImageUploadSerializer
 from .services import create_image
 
 logger = logging.getLogger(__name__)
+
+IMAGE_CACHE_MAX_AGE = 60 * 60 * 24 * 365  # one year, in seconds
 
 
 class ImageUploadView(APIView):
@@ -58,7 +61,16 @@ class ImageRetrieveView(APIView):
             )
             raise Http404("Image file not found")
 
-        return FileResponse(
+        response = FileResponse(
             file,
             content_type=image.content_type,
         )
+        # A completed image never changes for its UUID, so clients and CDNs
+        # can cache it for a year without revalidating.
+        patch_cache_control(
+            response,
+            public=True,
+            max_age=IMAGE_CACHE_MAX_AGE,
+            immutable=True,
+        )
+        return response

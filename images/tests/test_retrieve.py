@@ -33,6 +33,7 @@ def test_retrieve_completed_image(client, media_storage):
     assert response.status_code == 200
     assert response["Content-Type"] == "image/png"
     assert b"".join(response.streaming_content) == b"test content"
+    assert response["Cache-Control"] == "public, max-age=31536000, immutable"
 
 
 @pytest.mark.django_db
@@ -53,6 +54,8 @@ def test_retrieve_pending_image_returns_404(client, media_storage):
     response = client.get(reverse("image-detail", kwargs={"image_id": image.id}))
 
     assert response.status_code == 404
+    # The image may complete later, so a 404 must not be cached as immutable.
+    assert "immutable" not in response.get("Cache-Control", "")
 
 
 @pytest.mark.django_db

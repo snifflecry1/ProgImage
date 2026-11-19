@@ -4,6 +4,8 @@ A REST API for uploading, storing and retrieving images, built with Django, Djan
 
 ProgImage stores image metadata in PostgreSQL and image files in persistent filesystem storage. It uses Django's storage abstraction to keep the application independent of the underlying storage backend.
 
+For the design decisions, failure handling and trade-offs, see [DESIGN.md](DESIGN.md).
+
 ## Tech Stack
 
 - Python 3.12
@@ -110,6 +112,8 @@ The response contains the original image bytes with the appropriate `Content-Typ
 
 Images are streamed using Django's `FileResponse` rather than being loaded entirely into application memory.
 
+Successful responses include `Cache-Control: public, max-age=31536000, immutable`.
+
 **Not found — 404**
 
 A `404 Not Found` response is returned when:
@@ -173,108 +177,21 @@ The separate Compose project name isolates production-test volumes from the deve
 
 The production Compose configuration is intended to demonstrate the production container setup locally. An internet-facing deployment would additionally require HTTPS termination, appropriate secret management and infrastructure-level security controls.
 
-## Design Decisions
+## Maintenance
 
-### Image storage
+### Reconciling stale uploads
 
-Image metadata is stored in PostgreSQL, while image files are stored separately using Django's `FileField` and storage API.
-
-Each image is assigned a UUID, which is also used to construct its storage filename.
-
-For example:
-
-```text
-images/a602c1ce-3904-4c41-ac52-62901b7e5bc3.jpg
-```
-
-This avoids depending on user-provided filenames and makes storage keys predictable.
-
-The filesystem is backed by a persistent Docker volume so uploaded images survive container restarts.
-
-Django's storage abstraction allows the underlying storage backend to be changed in the future without tightly coupling application logic to local filesystem paths.
-
-### Upload lifecycle
-
-Each upload has a status:
-
-- `PENDING` — the metadata record has been created, but the upload has not completed
-- `COMPLETED` — the image has been stored successfully
-- `FAILED` — storage or completion failed; any written file has been removed
-
-The upload flow is:
-
-1. Validate the uploaded image.
-2. Create a database record with `PENDING` status.
-3. Save the file through Django's storage API.
-4. Mark the database record as `COMPLETED`.
-5. Return the image UUID.
-
-Only completed images are available through the GET endpoint.
-
-### Failure handling and consistency
-
-PostgreSQL and filesystem storage do not participate in a shared transaction.
-
-Consequently, a failure between writing the file and updating the database may leave a pending database record or an orphaned file.
-
-Failures are handled as follows:
-
-- If storage or the completion update fails, the error is logged, the record is marked `FAILED`, any written file is deleted, and the API returns `503 Service Unavailable`.
-- The file is only deleted after the record is confirmed `FAILED`, so a `COMPLETED` record never loses its file.
-- A `PENDING` record is only left behind if the database is unavailable during cleanup or the process is killed mid-upload.
-- Failed and pending uploads are not exposed through the retrieval endpoint.
-
-### Reconciliation
-
-Uploads left `PENDING` (for example, the database was unavailable during cleanup or the process was killed) are recovered by a management command:
+Uploads left `PENDING` (for example, if the process was killed mid-upload) can be cleaned up with:
 
 ```bash
+# Report stale uploads without changing anything
 docker compose exec api python manage.py reconcile_images --dry-run
+
+# Mark PENDING uploads older than 15 minutes as FAILED and delete their files
 docker compose exec api python manage.py reconcile_images --older-than 15
 ```
 
-Stale `PENDING` records are marked `FAILED` and any written file is deleted. They are not promoted to `COMPLETED`: the client never received the image ID, and the file may be partially written.
-
-The command is safe to run concurrently with uploads and with itself, because each record only changes state through a conditional update. In production it would run on a schedule, for example every 5 minutes with cron or a Kubernetes CronJob.
-
-A `(status, created_at)` index keeps the stale-upload query efficient as the table grows.
-
-### Database connections
-
-Connections are reused for up to 60 seconds (`CONN_MAX_AGE`, configurable with `POSTGRES_CONN_MAX_AGE`), and `CONN_HEALTH_CHECKS` checks a reused connection before each request, so a database restart or idle timeout causes a reconnect instead of a failed request.
-
-Application-level retries are deliberately not implemented. Retrying is only safe for steps that can be repeated without side effects (the initial insert and the conditional completion update), and retrying a whole upload without idempotency keys would create duplicate images. A failure mid-request returns `503`, and reconciliation guarantees that no record is left inconsistent.
-
-### Image validation
-
-Pillow is used to identify the actual image format and verify image structure.
-
-The API enforces file-size and pixel-count limits to reduce the risk of oversized uploads and excessive image-processing resource consumption.
-
-Validation is performed before creating the database record or writing the image to persistent storage.
-
-### Separation of responsibilities
-
-The application separates its responsibilities into:
-
-- **Views:** HTTP request and response handling
-- **Serializers:** Input validation
-- **Services:** Image creation and storage workflow
-- **Models:** Image metadata and lifecycle state
-
-This keeps individual components small and makes their behaviour straightforward to test.
-
-## Known Limitations and Future Improvements
-
-The following improvements would be appropriate for a larger production deployment:
-
-- Extended reconciliation: `COMPLETED` records whose file is missing, files with no matching record, and purging old `FAILED` records
-- Object storage such as Amazon S3 for distributed deployments
-- Additional monitoring and operational metrics
-- Rate limiting and authentication where access controls are required
-- More comprehensive image decoding checks for malformed files
-
-These features are intentionally outside the current implementation.
+`--older-than` defaults to 15 minutes and must be at least 1. In production this command would run on a schedule, for example every 5 minutes.
 
 ## Project Structure
 
@@ -291,6 +208,7 @@ ProgImage/
 │   ├── views.py         # API endpoints
 │   └── urls.py          # API routes
 ├── requirements/        # Development and production dependencies
+├── DESIGN.md            # Design decisions and trade-offs
 ├── Dockerfile
 ├── compose.yaml
 ├── compose.prod.yaml
@@ -304,3 +222,5 @@ ProgImage/
 ProgImage provides a small, focused image storage API with persistent storage, input validation, explicit upload states and automated tests.
 
 The implementation prioritises correctness, maintainability and clear failure behaviour while avoiding infrastructure that is unnecessary for the project's scope.
+
+See [DESIGN.md](DESIGN.md) for the design decisions, failure handling and known limitations.
