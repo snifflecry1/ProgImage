@@ -13,6 +13,7 @@ from .services import create_image
 
 logger = logging.getLogger(__name__)
 
+
 class ImageUploadView(APIView):
     parser_classes = [MultiPartParser]
 
